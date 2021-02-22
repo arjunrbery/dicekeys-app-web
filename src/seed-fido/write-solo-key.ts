@@ -1,11 +1,5 @@
 import { getRandomBytes } from "~dicekeys/get-random-bytes";
 
-class SeedingException extends Error {
-  constructor(message?: string) {
-    super(message);
-    this.name = this.constructor.name;
-  }
-}
 
 // Error reported when the user fails to grant access
 const CTAP_RESULT = {
@@ -15,6 +9,12 @@ const CTAP_RESULT = {
   ERR_INVALID_COMMAND: 0x01,
 } as const;
 
+class SeedingException extends Error {
+  constructor(message?: string) {
+    super(message);
+    this.name = this.constructor.name;
+  }
+}
 
 export class ExceptionUserDidNotAuthorizeSeeding extends SeedingException {}
 export class ExceptionKeyReportedInvalidLength extends SeedingException {}
@@ -34,12 +34,12 @@ const getExceptionForCtapResult = (ctapResult?: number): SeedingException => {
 
 const BroadcastChannel = 0xffffffff;
 
-const HIDCommands = {
-  CTAPHID_MSG: 0x03,
-  CTAPHID_INIT: 0x06,
-  CTAPHID_WINK: 0x08,
-  CTAPHID_ERROR: 0x3F,
-  CTAPHID_LOADKEY: 0x62,
+const CTAP_HID_Commands = {
+  MSG: 0x03,
+  INIT: 0x06,
+  WINK: 0x08,
+  ERROR: 0x3F,
+  WRITE_SEED: 0x62,
 } as const;
 
 // In DataView, set BigEndian by sending false to the littleEndian field.
@@ -175,7 +175,7 @@ const getChannel = (device: HIDDevice): Promise<number> =>
     device.addEventListener("inputreport", receiveEvent);
 
     try {
-      sendCtapHidMessage(device, BroadcastChannel, HIDCommands.CTAPHID_INIT, new DataView(channelCreationNonce));
+      sendCtapHidMessage(device, BroadcastChannel, CTAP_HID_Commands.INIT, new DataView(channelCreationNonce));
     } catch (e) {
       reject (e);
     }
@@ -183,7 +183,7 @@ const getChannel = (device: HIDDevice): Promise<number> =>
 
 
 
-const sendWriteMessage = async (device: HIDDevice, channel: number, seed: Uint8Array, extState: Uint8Array): Promise<void> => 
+const sendWriteSeedMessage = async (device: HIDDevice, channel: number, seed: Uint8Array, extState: Uint8Array): Promise<void> => 
   new Promise<void>( (resolve, reject) => {
     const commandVersion = 1;
     if (seed.length != 32) {
@@ -198,10 +198,10 @@ const sendWriteMessage = async (device: HIDDevice, channel: number, seed: Uint8A
       if (packet.channel != channel) {
         // This message wasn't meant for us.
       }
-      if (packet.command == HIDCommands.CTAPHID_LOADKEY) {
+      if (packet.command == CTAP_HID_Commands.WRITE_SEED) {
         // Return success
         resolve()
-      } else if (packet.command == HIDCommands.CTAPHID_ERROR) {
+      } else if (packet.command == CTAP_HID_Commands.ERROR) {
         // The message contains a 1-byte error code to report what went wrong
         reject(getExceptionForCtapResult(packet.message.getInt8(0)))
       } else {
@@ -219,17 +219,28 @@ const sendWriteMessage = async (device: HIDDevice, channel: number, seed: Uint8A
     // payload:  version  seedKey  extState
     const message = new Uint8Array([commandVersion, ...seed, ...extState]);
     try {
-      sendCtapHidMessage(device, channel, HIDCommands.CTAPHID_LOADKEY, new DataView(message))
+      sendCtapHidMessage(device, channel, CTAP_HID_Commands.WRITE_SEED, new DataView(message))
     } catch (e) {
       reject(e);
     }
   });
 
-export const writeSoloKey = async (device: HIDDevice, seed: Uint8Array, extState: Uint8Array = new Uint8Array(0)) => {
+/**
+ * Write a cryptographic seed to a seedable FIDO key 
+ * https://github.com/dicekeys/seeding-webauthn
+ * 
+ * @param device The USB FIDO key to write to
+ * @param seed The 32-byte cryptographic seed
+ * @param extState Up to 256-bytes of additional state to store
+ * 
+ * @throws ExceptionUserDidNotAuthorizeSeeding if the user does not authorize the write by tapping on the button.
+ * @throws SeedingException other exceptions (typically implementation issues)
+ */
+export const writeSeedToFIDOKey = async (device: HIDDevice, seed: Uint8Array, extState: Uint8Array = new Uint8Array(0)) => {
   await device.open();
   try {
     const channel = await getChannel(device);
-    return await sendWriteMessage(device, channel, seed, extState);
+    return await sendWriteSeedMessage(device, channel, seed, extState);
   } finally {
     device.close()
   }
