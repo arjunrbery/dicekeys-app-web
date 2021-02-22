@@ -1,13 +1,17 @@
-const seedableDeviceFilters: HIDDeviceFilter[] = [
-  {
-    vendorId: 0x10c4,
-    productId: 0x8acf,
-  },
-  {
-    vendorId: 0x483,
-    productId: 0xa2ca,
-  },
-]
+const isSeedable = ({vendorId, productId}: HIDDevice): boolean =>
+  (vendorId == 0x10c4 && productId == 0x8acf) ||
+  (vendorId == 0x483 && productId == 0xa2ca);
+  
+// const seedableDeviceFilters: HIDDeviceFilter[] = [
+  // {
+  //   vendorId: 0x10c4,
+  //   productId: 0x8acf,
+  // },
+  // {
+  //   vendorId: 0x483,
+  //   productId: 0xa2ca,
+  // },
+// ]
 const getFidoKeyDeviceId = (device: HIDDevice): string =>
   `${ device.productId ?? ""}:${ device.vendorId ?? ""}:${ device.productName ?? "" }`
 
@@ -16,6 +20,8 @@ const getFidoKeyDeviceId = (device: HIDDevice): string =>
  * connected via USB
  */
 export class SeedableFidoKeys {
+  private static _requiresPermission: boolean = true;
+  public static get requiresPermission(): boolean { return SeedableFidoKeys._requiresPermission; }
   /**
    * A set of callbacks to notify when the device list changes
    */
@@ -31,22 +37,29 @@ export class SeedableFidoKeys {
     }
   }
 
-  private static keysMap: Map<string, HIDDevice> = ((): Map<string, HIDDevice> => {
-    document.addEventListener('DOMContentLoaded', async () => {
- 
+  public static tryLoadKeys = async () => {
       // Request access to and get a listed of USB devices that meet our filters
       // for identifying seedable FIDO keys.
-      const devices = await navigator.hid.requestDevice({filters: seedableDeviceFilters});
-      for (const device of devices ) {
-        SeedableFidoKeys.keysMap.set(getFidoKeyDeviceId(device), device)
+      try {
+        const devices = await navigator.hid.requestDevice({filters: []}); // {filters: seedableDeviceFilters});
+        SeedableFidoKeys._requiresPermission = false;
+        for (const device of devices ) {
+          SeedableFidoKeys.keysMap.set(getFidoKeyDeviceId(device), device)
+        }
+        SeedableFidoKeys.notifyOnKeysChangedListeners();
+      } catch {
       }
-      SeedableFidoKeys.notifyOnKeysChangedListeners();
-    });
+  }
+
+  private static keysMap: Map<string, HIDDevice> = ((): Map<string, HIDDevice> => {
+    document.addEventListener('DOMContentLoaded', SeedableFidoKeys.tryLoadKeys);
 
     navigator.hid.addEventListener('connect', ({device}) => {
-      // Update the list if a new device is connected
-      SeedableFidoKeys.keysMap.set(getFidoKeyDeviceId(device), device);
-      SeedableFidoKeys.notifyOnKeysChangedListeners();
+      if (isSeedable(device)) {
+        // Update the list if a new device is connected
+        SeedableFidoKeys.keysMap.set(getFidoKeyDeviceId(device), device);
+        SeedableFidoKeys.notifyOnKeysChangedListeners();
+      }
     });
     
     navigator.hid.addEventListener('disconnect', ({device}) => {
@@ -54,6 +67,7 @@ export class SeedableFidoKeys {
       SeedableFidoKeys.keysMap.delete(getFidoKeyDeviceId(device));
       SeedableFidoKeys.notifyOnKeysChangedListeners();
     });
+
     return new Map<string, HIDDevice>();
   })();
 
@@ -68,7 +82,7 @@ export class SeedableFidoKeys {
    * Listen for changes to the set of connected potential seedable FIDO keys
    * @param callback A callback which optionally receives the current list of keys
    */
-  public onKeysChangedStartListening = (callback: (keys: HIDDevice[]) => any) => {
+  public static onKeysChangedStartListening = (callback: (keys: HIDDevice[]) => any) => {
     SeedableFidoKeys.onKeysChangedCallbacks.add(callback);
   }
 
@@ -76,7 +90,7 @@ export class SeedableFidoKeys {
    * Stop listening for changes to the set of connected potential seedable FIDO keys
    * @param callback The callback to remove
    */
-  public onKeysChangedStopListening = (callback: (keys: HIDDevice[]) => any) => {
+  public static onKeysChangedStopListening = (callback: (keys: HIDDevice[]) => any) => {
     SeedableFidoKeys.onKeysChangedCallbacks.delete(callback);
   }
 

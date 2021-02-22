@@ -34,9 +34,11 @@ import {
 //   describePasswordConsumerType
 // } from "../../phrasing/ui";
 import { AddPasswordDomain } from "./add-password-domain";
-import { PasswordJson } from "@dicekeys/seeded-crypto-js";
+import { PasswordJson, SeededCryptoModulePromise } from "@dicekeys/seeded-crypto-js";
 import { VerifyDiceKey } from "../backups/verify-dicekey";
 import { CenteredControls } from "~web-components/basic-building-blocks";
+import { SeedableFidoKeys } from "~seed-fido/seedable-keys";
+import { writeSeedToFIDOKey } from "~seed-fido/write-solo-key";
 
 interface DiceKeySvgViewOptions extends Attributes {
   diceKey: DiceKey;
@@ -62,6 +64,9 @@ export class DiceKeySvgView extends Component<DiceKeySvgViewOptions> {
     options: DiceKeySvgViewOptions
   ) {
     super(options);
+    const changeListener = () => this.renderSoon();
+    SeedableFidoKeys.onKeysChangedStartListening( changeListener );
+     this.detachEvent.on( () => SeedableFidoKeys.onKeysChangedStopListening( changeListener ) );
   }
 
   containerElement?: HTMLDivElement;
@@ -178,7 +183,24 @@ export class DiceKeySvgView extends Component<DiceKeySvgViewOptions> {
                 this.showOnlyVerifyDiceKeyComponent.set(true)
               )
             }),
-            InputButton({
+              ...( SeedableFidoKeys.requiresPermission ? [
+                InputButton({
+                  value: `Check for SoloKeys`,
+                  events: (events) => events.click.on( SeedableFidoKeys.tryLoadKeys )
+                })
+              ] : [])
+            ,
+            ...SeedableFidoKeys.keys.map( keyDevice =>
+              InputButton({
+                value: `Seed ${ keyDevice.productName }`,
+                events: (events) => events.click.on( async () => {
+                  const seedSecurityKeyRecipeTemplate = "{\"purpose\":\"seedSecurityKey\"}"
+                  const seed = (await SeededCryptoModulePromise).Secret.deriveFromSeed( DiceKey.toSeedString( this.options.diceKey, true), seedSecurityKeyRecipeTemplate);
+                  writeSeedToFIDOKey(keyDevice, seed.secretBytes)
+                })
+              })
+            )
+            ,InputButton({
               value: "Forget",
               events: (events) => events.click.on( () => {
                 EncryptedCrossTabState.instance?.forgetDiceKey();
