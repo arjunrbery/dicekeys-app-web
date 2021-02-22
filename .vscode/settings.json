@@ -3,6 +3,9 @@
     "typescript.tsdk": "node_modules/typescript/lib",
     "cSpell.words": [
         "API's",
+        "BCNTH",
+        "BCNTL",
+        "Ctap",
         "Googlebot",
         "Marshallers",
         "Openbot",

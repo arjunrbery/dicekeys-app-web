@@ -1,40 +1,36 @@
 import { getRandomBytes } from "~dicekeys/get-random-bytes";
 
-
-const seedableDeviceFilters: HIDDeviceFilter[] = [
-  {
-    vendorId: 0x10c4,
-    productId: 0x8acf,
-  },
-  {
-    vendorId: 0x483,
-    productId: 0xa2ca,
-  },
-]
-const getFidoKeyDeviceId = (device: HIDDevice): string =>
-  `${ device.productId ?? ""}:${ device.vendorId ?? ""}:${ device.productName ?? "" }`
-
-export class SeedableFidoKeys {
-  private static keys: Map<string, HIDDevice> = ((): Map<string, HIDDevice> => {
-    document.addEventListener('DOMContentLoaded', async () => {
-      
-      const devices = await navigator.hid.requestDevice({filters: seedableDeviceFilters});
-      for (const device of devices ) {
-        SeedableFidoKeys.keys.set(getFidoKeyDeviceId(device), device)
-      }
-    });
-
-    navigator.hid.addEventListener('connect', ({device}) => {
-      SeedableFidoKeys.keys.set(getFidoKeyDeviceId(device), device)
-    });
-    
-    navigator.hid.addEventListener('disconnect', ({device}) => {
-      SeedableFidoKeys.keys.delete(getFidoKeyDeviceId(device))
-    });
-    return new Map<string, HIDDevice>();
-  })();
+class SeedingException extends Error {
+  constructor(message?: string) {
+    super(message);
+    this.name = this.constructor.name;
+  }
 }
 
+// Error reported when the user fails to grant access
+const CTAP_RESULT = {
+  ERR_OPERATION_DENIED: 0x27,
+  ERR_INVALID_LENGTH: 0x03,
+  ERR_UNSUPPORTED_OPTION: 0x2B,
+  ERR_INVALID_COMMAND: 0x01,
+} as const;
+
+
+export class ExceptionUserDidNotAuthorizeSeeding extends SeedingException {}
+export class ExceptionKeyReportedInvalidLength extends SeedingException {}
+export class ExceptionKeyDoesNotSupportSeedingVersion extends SeedingException {}
+export class ExceptionKeyDoesNotSupportCommand extends SeedingException {}
+export class ExceptionUnknownSeedingException extends SeedingException {}
+
+const getExceptionForCtapResult = (ctapResult?: number): SeedingException => {
+  switch (ctapResult) {
+    case CTAP_RESULT.ERR_OPERATION_DENIED: return new ExceptionUserDidNotAuthorizeSeeding();
+    case CTAP_RESULT.ERR_INVALID_COMMAND: return new ExceptionKeyDoesNotSupportCommand();
+    case CTAP_RESULT.ERR_UNSUPPORTED_OPTION: return new ExceptionKeyDoesNotSupportSeedingVersion();
+    case CTAP_RESULT.ERR_INVALID_LENGTH: return new ExceptionKeyReportedInvalidLength();
+    default: return new ExceptionUnknownSeedingException();
+  }
+}
 
 const BroadcastChannel = 0xffffffff;
 
@@ -46,20 +42,10 @@ const HIDCommands = {
   CTAPHID_LOADKEY: 0x62,
 } as const;
 
-// const Defaults = {
-//   TIMEOUT_MS: 500,
-//   RETRIES: 5,
-//   RETRY_TIMEOUT_MS: 100
-// } as const;
-
 // In DataView, set BigEndian by sending false to the littleEndian field.
 const makeBigEndianPassingFalseForLittleEndian = false;
 
-const CTAP2_ERR_OPERATION_DENIED = 0x27;
-
-
 const hidPacketLengthInBytes = 64
-
 
 /// This class decodes CTAP HID packets received from a security key
 class CtapHidPacketReceived {
@@ -104,8 +90,8 @@ class CtapHidInitResponseMessage {
   constructor(private readonly message: DataView) {}
   
   // DATA    8-byte nonce
-  get nonce(): ArrayBuffer {
-    return this.message.buffer.slice(8, 16);
+  get nonce(): Uint8Array {
+    return new Uint8Array(this.message.buffer.slice(8, 16));
   }
 
   // DATA+8    4-byte channel ID
@@ -173,15 +159,18 @@ const getChannel = (device: HIDDevice): Promise<number> =>
   new Promise<number>( (resolve, reject) => {
     let channelCreationNonce = getRandomBytes(8)
     
-    // console.log("Sent channel request with nonce \([UInt8](channelCreationNonce))")
+    // console.log("Sent channel request with nonce \{channelCreationNonce}")
 
     const receiveEvent = (event: HIDInputReportEvent) => {
       const packet = new CtapHidPacketReceived(event.data);
       const message = new CtapHidInitResponseMessage(packet.message);
-      // FIXME -- if nonce doesn't match then do nothing and wait for next call
-      const channelCreated = message.channelCreated;  
-      device.removeEventListener("inputreport", receiveEvent);
-      resolve(channelCreated);
+      if (message.nonce.every( (byte, index) => byte == channelCreationNonce[index] )) {
+        // The nonces match so this is the channel we requested
+        const channelCreated = message.channelCreated;
+        resolve(channelCreated);
+        // We can stop listening
+        device.removeEventListener("inputreport", receiveEvent);
+      }
     }
     device.addEventListener("inputreport", receiveEvent);
 
@@ -192,26 +181,42 @@ const getChannel = (device: HIDDevice): Promise<number> =>
     }
   });
 
+
+
 const sendWriteMessage = async (device: HIDDevice, channel: number, seed: Uint8Array, extState: Uint8Array): Promise<void> => 
   new Promise<void>( (resolve, reject) => {
     const commandVersion = 1;
-    // FIXME -- verify order is correct (it matches iOS ordering, also check Android)
     if (seed.length != 32) {
-      // FIXME - reject
+      throw new ExceptionKeyReportedInvalidLength("Seed must be 32 bytes")
+    }
+    if (extState.length > 256) {
+      throw new ExceptionKeyReportedInvalidLength("ExtState must be 32 bytes")
     }
 
     const receiveEvent = (event: HIDInputReportEvent) => {
       const packet = new CtapHidPacketReceived(event.data);
-      // FIXME -- if nonce doesn't match then do nothing and wait for next call
-      device.removeEventListener("inputreport", receiveEvent);
+      if (packet.channel != channel) {
+        // This message wasn't meant for us.
+      }
       if (packet.command == HIDCommands.CTAPHID_LOADKEY) {
+        // Return success
         resolve()
       } else if (packet.command == HIDCommands.CTAPHID_ERROR) {
-        reject(packet.message)
+        // The message contains a 1-byte error code to report what went wrong
+        reject(getExceptionForCtapResult(packet.message.getInt8(0)))
+      } else {
+        reject(new ExceptionUnknownSeedingException())
       }
+      // Now that we've received a response we can stop listening.
+      device.removeEventListener("inputreport", receiveEvent);
+
     }
     device.addEventListener("inputreport", receiveEvent);
 
+    // SoloKeys code triggered by this call is at:
+    // https://github.com/conorpp/solo/blob/eae4af7dcd2aef689b16a43adf0e1719adcc9f16/fido2/ctaphid.c#L786
+    // bytes:       1        32     0..256
+    // payload:  version  seedKey  extState
     const message = new Uint8Array([commandVersion, ...seed, ...extState]);
     try {
       sendCtapHidMessage(device, channel, HIDCommands.CTAPHID_LOADKEY, new DataView(message))
